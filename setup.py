@@ -157,6 +157,7 @@ dll_base_address = 0x1e200000
 
 def _find_landmark_dirpath(root, landmark_filename):
     for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in ('arm', 'arm64')]
         if landmark_filename in {f.lower() for f in filenames}:
             return dirpath
 
@@ -264,6 +265,18 @@ def find_platform_sdk_dir():
 
     return include_dirpath, lib_dirpath
 
+sdk_include, sdk_lib = find_platform_sdk_dir()
+#~ sdk_dir = find_platform_sdk_dir()
+if None in (sdk_include, sdk_lib):
+  print
+  print "It looks like you are trying to build pywin32 in an environment without"
+  print "the necessary tools installed. It's much easier to grab binaries!"
+  print
+  print "Please read the docstring at the top of this file, or read README.md"
+  print "for more information."
+  print
+  raise RuntimeError("Can't find the Windows SDK")
+
 # Some nasty hacks to prevent most of our extensions using a manifest, as
 # the manifest - even without a reference to the CRT assembly - is enough
 # to prevent the extension from loading.  For more details, see
@@ -339,18 +352,6 @@ if sys.version_info > (2,6):
     MSVCCompiler.spawn = monkeypatched_spawn
     MSVCCompiler.link = monkeypatched_link
 
-
-include_dir, lib_dir = find_platform_sdk_dir()
-#~ sdk_dir = find_platform_sdk_dir()
-if None in (include_dir, lib_dir):
-  print
-  print "It looks like you are trying to build pywin32 in an environment without"
-  print "the necessary tools installed. It's much easier to grab binaries!"
-  print
-  print "Please read the docstring at the top of this file, or read README.md"
-  print "for more information."
-  print
-  raise RuntimeError("Can't find the Windows SDK")
 
 class WinExt (Extension):
     # Base class for all win32 extensions, with some predefined
@@ -641,7 +642,7 @@ class WinExt_win32com_axdebug(WinExt_win32com):
     def __init__ (self, name, **kw):
         # Later SDK versions again ship with activdbg.h, but if we attempt
         # to use our own copy of that file with that SDK, we fail to link.
-        if os.path.isfile(os.path.join(sdk_dir, "include", "activdbg.h")):
+        if os.path.isfile(os.path.join(sdk_include, "activdbg.h")):
             kw.setdefault('extra_compile_args', []).append("/DHAVE_SDK_ACTIVDBG")
         WinExt_win32com.__init__(self, name, **kw)
 
@@ -802,7 +803,7 @@ class my_build_ext(build_ext):
         assert self.compiler.initialized # if not, our env changes will be lost!
 
         is_64bit = self.plat_name == 'win-amd64'
-        extra = os.path.join(sdk_dir, 'include')
+        extra = sdk_include
         # should not be possible for the SDK dirs to already be in our
         # include_dirs - they may be in the registry etc from MSVC, but
         # those aren't reflected here...
@@ -811,9 +812,11 @@ class my_build_ext(build_ext):
         assert os.path.isdir(extra), "%s doesn't exist!" % (extra,)
         self.compiler.add_include_dir(extra)
         # and again for lib dirs.
-        extra = os.path.join(sdk_dir, 'lib')
+        extra = os.path.normpath(sdk_lib)
         if is_64bit:
-            extra = os.path.join(extra, 'x64')
+            parts = extra.split(os.sep)
+            if "x64" not in parts:
+                extra = os.path.join(extra, 'x64')
             assert os.path.isdir(extra), extra
         assert extra not in self.library_dirs # see above
         assert os.path.isdir(extra), "%s doesn't exist!" % (extra,)
@@ -840,20 +843,6 @@ class my_build_ext(build_ext):
         log.debug("After SDK processing, includes are %s", self.compiler.include_dirs)
         log.debug("After SDK processing, libs are %s", self.compiler.library_dirs)
 
-        # Vista SDKs have a 'VC' directory with headers and libs for older
-        # compilers.  We need to hack the support in here so that the
-        # directories are after the compiler's own.  As noted above, the
-        # only way to ensure they are after the compiler's is to put them
-        # in the environment, which has the nice side-effect of working
-        # for the rc executable.
-        # We know its not needed on vs9...
-        if get_build_version() < 9.0:
-            if os.path.isdir(os.path.join(sdk_dir, 'VC', 'INCLUDE')):
-                os.environ["INCLUDE"] += ";" + os.path.join(sdk_dir, 'VC', 'INCLUDE')
-                log.debug("Vista SDK found: %%INCLUDE%% now %s", os.environ["INCLUDE"])
-            if os.path.isdir(os.path.join(sdk_dir, 'VC', 'LIB')):
-                os.environ["LIB"] += ";" + os.path.join(sdk_dir, 'VC', 'LIB')
-                log.debug("Vista SDK found: %%LIB%% now %s", os.environ["LIB"])
 
     def _why_cant_build_extension(self, ext):
         # Return None, or a reason it can't be built.
@@ -1034,7 +1023,7 @@ class my_build_ext(build_ext):
             if not self.compiler.initialized:
                 self.compiler.initialize()
 
-        if sdk_dir:
+        if (sdk_include and sdk_lib):
             self._fixup_sdk_dirs()
 
         # Here we hack a "pywin32" directory (one of 'win32', 'win32com',
@@ -1780,10 +1769,10 @@ win32_extensions += [
 # causes problems with references to the @__security_check_cookie magic.
 # Use bufferoverflowu.lib if it exists.
 win32help_libs = "htmlhelp user32 advapi32"
-if sdk_dir and os.path.exists(os.path.join(sdk_dir, "Lib", "bufferoverflowu.lib")):
+if sdk_lib and os.path.exists(os.path.join(sdk_lib, "bufferoverflowu.lib")):
     win32help_libs += " bufferoverflowu"
 # but of-course the Vista SDK does it differently...
-elif sdk_dir and os.path.exists(os.path.join(sdk_dir, "VC", "Lib", "RunTmChk.lib")):
+elif sdk_lib and os.path.exists(os.path.join(sdk_lib, "VC", "Lib", "RunTmChk.lib")):
     win32help_libs += " RunTmChk"
 win32_extensions += [
     WinExt_win32('win32help',
