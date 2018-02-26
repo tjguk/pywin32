@@ -11,7 +11,7 @@ to build and install into your current Python installation.
 
 These extensions require a number of libraries to build, some of which may
 require you to install special SDKs or toolkits.  This script will attempt
-to build as many as it can, and at the end of the build will report any 
+to build as many as it can, and at the end of the build will report any
 extension modules that could not be built and why.
 
 This has got complicated due to the various different versions of
@@ -155,44 +155,61 @@ if os.path.dirname(this_file):
 # dll_base_address later in this file...
 dll_base_address = 0x1e200000
 
-# We need to know the platform SDK dir before we can list the extensions.
-def find_platform_sdk_dir():
-    # Finding the Platform SDK install dir is a treat. There can be some
-    # dead ends so we only consider the job done if we find the "windows.h"
-    # landmark.
-    DEBUG = False # can't use log.debug - not setup yet
-    landmark = "include\\windows.h"
-    # 1. The use might have their current environment setup for the
-    #    SDK, in which case the "MSSdk" env var is set.
-    sdkdir = os.environ.get("MSSdk")
-    if sdkdir:
-        if DEBUG:
-            print "PSDK: try %%MSSdk%%: '%s'" % sdkdir
-        if os.path.isfile(os.path.join(sdkdir, landmark)):
-            return sdkdir
+def _find_landmark_dirpath(root, landmark_filename):
+    for dirpath, dirnames, filenames in os.walk(root):
+        if landmark_filename in {f.lower() for f in filenames}:
+            return dirpath
+
+include_landmark = "windows.h"
+lib_landmark = "kernel32.lib"
+class SDKNotFoundError(Exception): pass
+
+def _check_sdk_path(sdk_dirpath):
+    """Check whether a particular SDK root contains all of the landmark
+    files we are looking for. If it does, return the respective folders;
+    if it doesn't, raise SDKNotFoundError
+    """
+    if not os.path.isdir(sdk_dirpath):
+        print("WARNING: looking for SDK in %s which isn't a directory" % sdk_dirpath)
+    include_dirpath = _find_landmark_dirpath(sdk_dirpath, include_landmark)
+    if include_dirpath is None:
+        raise SDKNotFoundError()
+    lib_dirpath = _find_landmark_dirpath(sdk_dirpath, lib_landmark)
+    if lib_dirpath is None:
+        raise SDKNotFoundError()
+    return include_dirpath, lib_dirpath
+
+def candidate_dirpaths():
+    """Yield each of the candidate paths which might contain a valid
+    SDK under which the two landmark files could be found. Along with the
+    path, yield a context to make logging a little easier. To make this
+    code a little simpler, it doesn't matter if it yields None.
+    """
+    #
+    # 1. If the MSSDK env var is set, use that path
+    #
+    yield "%MSSDK%", os.environ.get("MSSdk")
+
     # 2. The "Install Dir" value in the
     #    HKLM\Software\Microsoft\MicrosoftSDK\Directories registry key
     #    sometimes points to the right thing. However, after upgrading to
     #    the "Platform SDK for Windows Server 2003 SP1" this is dead end.
+    hklm_key = r"Software\Microsoft\MicrosoftSDK\Directories"
     try:
-        key = _winreg.OpenKey(_winreg.HKEY_LOCAL_MACHINE,
-                              r"Software\Microsoft\MicrosoftSDK\Directories")
+        key = _winreg.OpenKey(_winreg.HKEY_LOCAL_MACHINE, hklm_key)
         sdkdir, ignore = _winreg.QueryValueEx(key, "Install Dir")
     except EnvironmentError:
         pass
     else:
-        if DEBUG:
-            print r"PSDK: try 'HKLM\Software\Microsoft\MicrosoftSDK"\
-                   "\Directories\Install Dir': '%s'" % sdkdir
-        if os.path.isfile(os.path.join(sdkdir, landmark)):
-            return sdkdir
+        yield "HKLM\\" + hklm_key, sdkdir
+
     # 3. Each installed SDK (not just the platform SDK) seems to have GUID
     #    subkey of HKLM\Software\Microsoft\MicrosoftSDK\InstalledSDKs and
     #    it *looks* like the latest installed Platform SDK will be the
     #    only one with an "Install Dir" sub-value.
     try:
-        key = _winreg.OpenKey(_winreg.HKEY_LOCAL_MACHINE,
-                              r"Software\Microsoft\MicrosoftSDK\InstalledSDKs")
+        hklm_key = r"Software\Microsoft\MicrosoftSDK\InstalledSDKs"
+        key = _winreg.OpenKey(_winreg.HKEY_LOCAL_MACHINE, hklm_key)
         i = 0
         while True:
             guid = _winreg.EnumKey(key, i)
@@ -202,28 +219,20 @@ def find_platform_sdk_dir():
             except EnvironmentError:
                 pass
             else:
-                if DEBUG:
-                    print r"PSDK: try 'HKLM\Software\Microsoft\MicrosoftSDK"\
-                           "\InstallSDKs\%s\Install Dir': '%s'"\
-                           % (guid, sdkdir)
-                if os.path.isfile(os.path.join(sdkdir, landmark)):
-                    return sdkdir
+                yield "HKLM\\" + hklm_key, sdkdir
             i += 1
     except EnvironmentError:
         pass
+
     # 4.  Vista's SDK
     try:
-        key = _winreg.OpenKey(_winreg.HKEY_LOCAL_MACHINE,
-                              r"Software\Microsoft\Microsoft SDKs\Windows")
+        hklm_key = r"Software\Microsoft\Microsoft SDKs\Windows"
+        key = _winreg.OpenKey(_winreg.HKEY_LOCAL_MACHINE, hklm_key)
         sdkdir, ignore = _winreg.QueryValueEx(key, "CurrentInstallFolder")
     except EnvironmentError:
         pass
     else:
-        if DEBUG:
-            print r"PSDK: try 'HKLM\Software\Microsoft\MicrosoftSDKs"\
-                   "\Windows\CurrentInstallFolder': '%s'" % sdkdir
-        if os.path.isfile(os.path.join(sdkdir, landmark)):
-            return sdkdir
+        yield "HKLM\\" + hklm_key, sdkdir
 
     # 5. Failing this just try a few well-known default install locations.
     progfiles = os.environ.get("ProgramFiles", r"C:\Program Files")
@@ -232,11 +241,28 @@ def find_platform_sdk_dir():
         os.path.join(progfiles, "Microsoft SDK"),
     ]
     for sdkdir in defaultlocs:
-        if DEBUG:
-            print "PSDK: try default location: '%s'" % sdkdir
-        if os.path.isfile(os.path.join(sdkdir, landmark)):
-            return sdkdir
+        yield sdkdir, sdkdir
 
+# We need to know the platform SDK dir before we can list the extensions.
+def find_platform_sdk_dir():
+    # Finding the Platform SDK install dir is a treat. There can be some
+    # dead ends so we only consider the job done if we find the "windows.h"
+    # landmark.
+    DEBUG = True # can't use log.debug - not setup yet
+
+    include_dirpath = lib_dirpath = None
+    for context, dirpath in candidate_dirpaths():
+        if dirpath is None:
+            continue
+        try:
+            if DEBUG: print("Trying %s from %s" % (dirpath, context))
+            include_dirpath, lib_dirpath = _check_sdk_path(dirpath)
+        except SDKNotFoundError:
+            continue
+        else:
+            break
+
+    return include_dirpath, lib_dirpath
 
 # Some nasty hacks to prevent most of our extensions using a manifest, as
 # the manifest - even without a reference to the CRT assembly - is enough
@@ -267,7 +293,7 @@ if sys.version_info > (2,6):
     # always monkeypatch it in even though it will only be called in 2.7
     # and 3.2+.
     MSVCCompiler.manifest_get_embed_info = manifest_get_embed_info
-        
+
     def monkeypatched_spawn(self, cmd):
         is_link = cmd[0].endswith("link.exe") or cmd[0].endswith('"link.exe"')
         is_mt = cmd[0].endswith("mt.exe") or cmd[0].endswith('"mt.exe"')
@@ -300,7 +326,7 @@ if sys.version_info > (2,6):
                     break
 
     def monkeypatched_link(self, target_desc, objects, output_filename, *args, **kw):
-        # no manifests for 3.3+ 
+        # no manifests for 3.3+
         self._want_assembly_kept = sys.version_info < (3,3) and \
                                    (os.path.basename(output_filename).startswith("PyISAPI_loader.dll") or \
                                     os.path.basename(output_filename).startswith("perfmondata.dll") or \
@@ -314,8 +340,9 @@ if sys.version_info > (2,6):
     MSVCCompiler.link = monkeypatched_link
 
 
-sdk_dir = find_platform_sdk_dir()
-if not sdk_dir:
+include_dir, lib_dir = find_platform_sdk_dir()
+#~ sdk_dir = find_platform_sdk_dir()
+if None in (include_dir, lib_dir):
   print
   print "It looks like you are trying to build pywin32 in an environment without"
   print "the necessary tools installed. It's much easier to grab binaries!"
@@ -329,7 +356,7 @@ class WinExt (Extension):
     # Base class for all win32 extensions, with some predefined
     # library and include dirs, and predefined windows libraries.
     # Additionally a method to parse .def files into lists of exported
-    # symbols, and to read 
+    # symbols, and to read
     def __init__ (self, name, sources,
                   include_dirs=[],
                   define_macros=None,
@@ -482,7 +509,7 @@ class WinExt (Extension):
             self.extra_link_args.append("/DEBUG")
             self.extra_link_args.append("/PDB:%s\%s.pdb" %
                                        (pch_dir, self.name))
-            # enable unwind semantics - some stuff needs it and I can't see 
+            # enable unwind semantics - some stuff needs it and I can't see
             # it hurting
             self.extra_compile_args.append("/EHsc")
 
@@ -568,8 +595,8 @@ class WinExt_win32com(WinExt):
 # * Require use of the Exchange 2000 SDK - this works for both VC6 and 7
 class WinExt_win32com_mapi(WinExt_win32com):
     def __init__ (self, name, **kw):
-        # The Exchange 2000 SDK seems to install itself without updating 
-        # LIB or INCLUDE environment variables.  It does register the core 
+        # The Exchange 2000 SDK seems to install itself without updating
+        # LIB or INCLUDE environment variables.  It does register the core
         # directory in the registry tho - look it up
         sdk_install_dir = None
         libs = kw.get("libraries", "")
@@ -595,7 +622,7 @@ class WinExt_win32com_mapi(WinExt_win32com):
             d = os.path.join(sdk_install_dir, "SDK", "Lib")
             if os.path.isdir(d):
                 kw.setdefault("library_dirs", []).insert(0, d)
-                
+
         # The stand-alone exchange SDK has these libs
         if distutils.util.get_platform() == 'win-amd64':
             # Additional utility functions are only available for 32-bit builds.
@@ -637,7 +664,7 @@ if do_2to3:
                     urllib xrange""".split()
         fqfixers = ['lib2to3.fixes.fix_' + f for f in fixers]
 
-        options = dict(doctests_only=False, fix=[], list_fixes=[], 
+        options = dict(doctests_only=False, fix=[], list_fixes=[],
                        print_function=False, verbose=False,
                        write=True)
         r = RefactoringTool(fqfixers, options)
@@ -668,20 +695,20 @@ if do_2to3:
 
         def run(self):
             self.updated_files = []
-    
+
             # Base class code
             if self.py_modules:
                 self.build_modules()
             if self.packages:
                 self.build_packages()
                 self.build_package_data()
-    
+
             # 2to3
             refactor_filenames(self.updated_files)
-    
+
             # Remaining base class code
             self.byte_compile(self.get_outputs(include_bytecode=0))
-    
+
         def build_module(self, module, module_file, package):
             res = build_py.build_module(self, module, module_file, package)
             if res[1]:
@@ -998,7 +1025,7 @@ class my_build_ext(build_ext):
         # First, sanity-check the 'extensions' list
         self.check_extensions_list(self.extensions)
 
-        self.found_libraries = {}        
+        self.found_libraries = {}
 
         if not hasattr(self.compiler, 'initialized'):
             # 2.3 and earlier initialized at construction
@@ -1620,7 +1647,7 @@ for info in (
         ("win2kras", "rasapi32", None, 0x0500, "win32/src/win2krasmodule.cpp"),
         ("win32cred", "AdvAPI32 credui", True, 0x0501, 'win32/src/win32credmodule.cpp'),
         ("win32crypt", "Crypt32 Advapi32", True, 0x0500, """
-            win32/src/win32crypt/win32cryptmodule.cpp	
+            win32/src/win32crypt/win32cryptmodule.cpp
             win32/src/win32crypt/win32crypt_structs.cpp
             win32/src/win32crypt/PyCERTSTORE.cpp
             win32/src/win32crypt/PyCERT_CONTEXT.cpp
@@ -1686,7 +1713,7 @@ for info in (
     if len(info)>4:
         sources = info[4].split()
     extra_compile_args = []
-    ext = WinExt_win32(name, 
+    ext = WinExt_win32(name,
                  libraries=lib_names,
                  extra_compile_args = extra_compile_args,
                  windows_h_version = windows_h_ver,
@@ -1712,7 +1739,7 @@ win32_extensions += [
            delay_load_libraries="powrprof",
            windows_h_version=0x0500,
         ),
-    WinExt_win32("win32gui", 
+    WinExt_win32("win32gui",
            sources = """
                 win32/src/win32dynamicdialog.cpp
                 win32/src/win32gui.i
@@ -2475,7 +2502,7 @@ packages=['win32com',
           'win32comext.directsound.test',
           'win32comext.authorization',
           'win32comext.bits',
-          
+
           'pythonwin.pywin',
           'pythonwin.pywin.debugger',
           'pythonwin.pywin.dialogs',
@@ -2549,10 +2576,10 @@ dist = setup(name="pywin32",
       packages = packages,
       py_modules = py_modules,
 
-      data_files=[('', (os.path.join(gettempdir(),'pywin32.version.txt'),))] + 
+      data_files=[('', (os.path.join(gettempdir(),'pywin32.version.txt'),))] +
         convert_optional_data_files([
                 'PyWin32.chm',
-                ]) + 
+                ]) +
         convert_data_files([
                 'pythonwin/pywin/*.cfg',
                 'pythonwin/pywin/Demos/*.py',
