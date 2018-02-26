@@ -156,6 +156,20 @@ if os.path.dirname(this_file):
 dll_base_address = 0x1e200000
 
 def _find_landmark_dirpath(root, landmark_filename):
+    """Look underneath the apparent root of an SDK to find the
+    include and the lib folder for later use.
+
+    In principle this is just a question of walking the folder tree and finding
+    a couple of landmark files. However... the more recent SDK structure has:
+    an overall root under, eg, "C:\Program Files (x86)\Windows Kits\10"
+    which has a lib and an include directory. Each of those directories has
+    a set of subdirectories, one for each of ucrt and um, each of which has an
+    architecture (arm, arm64, x86, x64).
+
+    We can exclude the ARM folders but we then need to work out which of the
+    other architecture folders to offer. For now, we'll just prefer the platform
+    we're on. It's not foolproof, but it's possible.
+    """
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [d for d in dirnames if d not in ('arm', 'arm64')]
         if landmark_filename in {f.lower() for f in filenames}:
